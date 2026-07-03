@@ -55,16 +55,16 @@ learned edge and feature masks, including a step we show is mis-stated in the
 original derivation, connecting it to the practical optimization implemented
 in PyTorch Geometric \citep{fey2019fast}. We study two failure modes. First,
 gradient-based mask optimization can become trapped in local optima; on a
-novel multi-size clique dataset, explanation F1 drops from 0.12 for triangles
-to 0.00 for 5-cliques. Second, motivated by 2026 work showing that
-jointly-trained \emph{self-explainable} GNNs can produce explanations
-provably unrelated to a model's actual reasoning
-\citep{azzolin2026gnnexplanations}, we add two constant, label-independent
-color features to the clique dataset and test whether \GNNEx's feature
-mask mistakes either one for a real signal. We find only a weak and
-inconsistent version of this failure: the mask does not fully suppress
-either feature, but the class-dependent gap is small and does not track
-which class the classifier finds harder to predict.
+novel multi-size clique dataset, explanation F1 stays between 0.13 and
+0.26 across clique sizes and the optimizer never recovers a full clique.
+Second, motivated by 2026 work showing that jointly-trained
+\emph{self-explainable} GNNs can produce explanations provably unrelated
+to a model's actual reasoning \citep{azzolin2026gnnexplanations}, we add
+two constant, label-independent color features to the clique dataset and
+test whether \GNNEx's feature mask mistakes either one for a real signal.
+We find a partial version of this failure: one color feature shows almost
+no class-dependent gap, but the other shows a large one, disproportionate
+to the underlying difference in classifier accuracy between classes.
 \end{abstract}
 
 
@@ -514,12 +514,15 @@ explanation, yet represents only 3 of the 10 true explanatory edges.
 
 \subsection{GNN Architecture and Training}
 
-We train a 3-layer GCN \citep{kipf2017semi} with 64 hidden units, ReLU
-activations, and dropout ($p=0.5$), for 300 epochs using Adam
+We train a 2-layer GCN \citep{kipf2017semi} with 64 hidden units, ReLU
+activations, and dropout ($p=0.5$), for 600 epochs using Adam
 \citep{kingma2015adam} with learning rate $10^{-2}$ and weight decay
-$5\times10^{-4}$. We apply class-weighted cross-entropy
+$5\times10^{-5}$. We apply class-weighted cross-entropy
 ($w_1 = n_{\mathrm{base}}/n_{\mathrm{clique}}$) to compensate for the 127:73
-class imbalance.
+class imbalance. These hyperparameters were tuned by a small grid search
+over depth, width, epochs, and weight decay for the best-balanced accuracy
+across classes; a 3-layer, 300-epoch configuration under-fit the base class
+(Section~\ref{sec:limitations}).
 
 \subsection{Explainer Configuration and Evaluation Metrics}
 
@@ -557,11 +560,11 @@ found among the true clique nodes in the thresholded explanation subgraph
 \paragraph{Anchor-feature (color) weight.}
 \GNNEx optimizes a separate feature mask for each explained node; write
 $\bfM_F^{(v)}$ for the mask learned while explaining $v$
-(Eq.~\ref{eq:feat_mask}), and
-$\bfw_v := \sigmoid\bigl(\bfM_F^{(v)}[v,:]\bigr) \in (0,1)^2$ for $v$'s own
-row of it, the weight \GNNEx assigns to $v$'s own $\text{color}_1$ and
-$\text{color}_2$ entries. A faithful explainer should assign $\bfw_v$ a low
-value that does not depend on $v$'s class. A class-dependent asymmetry,
+(Eq.~\ref{eq:feat_mask}), one row per node in $v$'s computation graph. Let
+$\bfw_v \in (0,1)^2$ be the sigmoid of $v$'s row of $\bfM_F^{(v)}$: the
+weight \GNNEx assigns to $v$'s $\text{color}_1$ and $\text{color}_2$
+entries. A faithful explainer should assign $\bfw_v$ a low value that does
+not depend on $v$'s class. A class-dependent asymmetry,
 e.g., a high $\text{color}_1$ weight on clique nodes paired with a high
 $\text{color}_2$ weight on non-clique nodes, would be a soft version of the
 deterministic encoding constructed in Section~\ref{subsec:anchor}, though
@@ -574,18 +577,19 @@ not \GNNEx.
 
 \subsection{Multi-Size Clique Detection}
 
-The GCN reaches 71.5\% overall accuracy: 90.4\% on clique nodes but only
-60.6\% on base nodes, so the class-weighted loss favors confidently
-detecting cliques at the cost of base-node accuracy, which directly affects
-the explainer.
+The GCN reaches 78.5\% overall accuracy: 79.5\% on base nodes and 76.7\% on
+clique nodes, a balanced fit that gives the explainer a real gradient
+signal on both classes.
 
-Table~\ref{tab:results} shows a sharp degradation with clique size: F1
-falls from 0.124 ($k=3$) to 0.000 for $k=4$ and $k=5$, where the optimizer
-recovers no edge within the true clique. This confirms the local-optima
-mechanism of Section~\ref{subsec:localopt}: for $k=3$ the target has only 3
-edges, so the optimizer sometimes reaches it before converging, while for
-larger cliques any single clique edge is already a locally sufficient
-explanation.
+Table~\ref{tab:results} shows explanation quality still falls well short of
+full recovery at every clique size, though not strictly monotonically: F1
+is 0.199 ($k=3$), 0.261 ($k=4$), and 0.132 ($k=5$), and the optimizer never
+recovers the full clique on average, at best 2.56 of 4 edges. The $k=5$
+case remains clearly the worst, consistent with the local-optima mechanism
+of Section~\ref{subsec:localopt}: as $k$ grows, more competing sub-clique
+local optima exist. The non-monotonic gap between $k=3$ and $k=4$ likely
+reflects the small number of cliques per size (8 and 6) rather than the
+effect's absence.
 
 \begin{table}[t]
   \centering
@@ -600,10 +604,10 @@ explanation.
     \toprule
     Clique size & Precision & Recall & F1 & Expl.\ clique \\
     \midrule
-    $k=3$ (triangles)  & 0.174 & 0.097 & $0.124 \pm 0.204$ & 1.29 / 3 \\
-    $k=4$              & 0.000 & 0.000 & $0.000 \pm 0.000$ & 1.00 / 4 \\
-    $k=5$              & 0.000 & 0.000 & $0.000 \pm 0.000$ & 1.00 / 5 \\
-    All clique nodes   & 0.073 & 0.041 & $0.052 \pm 0.146$ & -- \\
+    $k=3$ (triangles)  & 0.202 & 0.326 & $0.199 \pm 0.134$ & 1.96 / 3 \\
+    $k=4$              & 0.286 & 0.329 & $0.261 \pm 0.124$ & 2.56 / 4 \\
+    $k=5$              & 0.156 & 0.117 & $0.132 \pm 0.110$ & 1.87 / 5 \\
+    All clique nodes   & 0.216 & 0.272 & $0.201 \pm 0.134$ & -- \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -616,23 +620,23 @@ over 57 explained clique nodes and 50 explained non-clique nodes. A faithful
 explainer would assign both $\text{color}_1$ and $\text{color}_2$ a weight
 close to 0, equally for both classes, since both are constant and carry no
 information about $y_v$. Neither is suppressed to near zero: clique nodes
-receive $\text{color}_1=0.186$ and $\text{color}_2=0.266$, and non-clique
-nodes receive $\text{color}_1=0.188$ and $\text{color}_2=0.235$, so the
+receive $\text{color}_1=0.230$ and $\text{color}_2=0.572$, and non-clique
+nodes receive $\text{color}_1=0.209$ and $\text{color}_2=0.291$, so the
 default regularization does not drive a genuinely irrelevant feature to 0
 within 150 steps.
 
-The class-dependent gap, however, is small: $\text{color}_1$ shows
-essentially none (0.186 vs.\ 0.188), and $\text{color}_2$ shows only a
-modest one (0.266 vs.\ 0.235) that does not track classifier confidence as a
-compensation account would predict, since clique nodes are now the
-\emph{easier} class (90.4\% vs.\ 60.6\% accuracy) yet receive the higher
-weight. \GNNEx is thus only weakly susceptible to the
-Section~\ref{subsec:anchor} failure once the anchor feature is made truly
-constant: it does not fabricate a clean, deterministic encoding
-($g(\text{color}_1){=}\text{clique}$), but the small, unexplained gap on
-$\text{color}_2$ shows it is not perfectly faithful either, a gap
-Section~\ref{sec:limitations} attributes to $\Phi$'s training rather than
-\GNNEx.
+The class-dependent gap is uneven across the two features: $\text{color}_1$
+still shows only a small gap (0.230 vs.\ 0.209), but $\text{color}_2$ shows
+a substantial one (0.572 vs.\ 0.291), with clique nodes, the very slightly
+\emph{harder} class here (76.7\% vs.\ 79.5\% accuracy), receiving the much
+higher weight. This direction fits a compensation account, though a
+2.8-point accuracy gap cannot explain a 0.281 weight gap on its own.
+\GNNEx does not fabricate a clean, deterministic encoding
+($g(\text{color}_1){=}\text{clique}$): 0.572 is still far from 1. But this
+large, disproportionate gap on $\text{color}_2$ is a clearer instance of
+the Section~\ref{subsec:anchor} failure than with the earlier, less
+balanced classifier, a gap Section~\ref{sec:limitations} attributes to
+$\Phi$'s training, not \GNNEx.
 
 
 \section{Limitations}
@@ -655,9 +659,11 @@ identical nodes than amortized methods like PGExplainer
 Third, \citet{faber2021when} and \citet{agarwal2022probing} argue that
 comparing an explanation to ground truth can itself be misleading: a
 badly-trained GNN may not use the planted motif at all, so a low score
-reflects the classifier, not the explainer. Our clique GCN reaches 90.4\%
-accuracy on clique nodes but only 60.6\% on base nodes, so some of the F1
-gap may not be \GNNEx's fault. The same applies even more sharply to our
+reflects the classifier, not the explainer. An earlier, untuned
+configuration of our clique GCN reached 90.4\% accuracy on clique nodes but
+only 60.6\% on base nodes; the tuned GCN of Section~\ref{sec:experiments}
+narrows this to 76.7\% and 79.5\%, but some of the residual F1 gap may
+still not be \GNNEx's fault. The same applies even more sharply to our
 anchor-feature check (Section~\ref{subsec:anchor_results}): since \GNNEx
 only reports what $\Phi$ already relies on (Section~\ref{subsec:anchor}),
 any non-zero color weight we measure is a statement about $\Phi$'s
@@ -676,18 +682,20 @@ direction, so the continuous relaxation underlying \GNNEx is best
 understood as a heuristic, not a provable bound. Our main structural
 contribution concretely investigates the local-optima behavior the
 original authors already anticipate but do not characterize, confirmed on
-the clique benchmark: F1 drops from 0.12 for triangles to 0.00 for
-5-cliques. Our main empirical contribution adapts a 2026 unfaithfulness
-result for self-explainable GNNs into a testable question for \GNNEx: once
-the anchor features are made truly constant, its feature mask cannot
-reproduce the clean, deterministic failure of a jointly-trained extractor,
-and only a weak, partly unexplained trace survives.
+the clique benchmark: F1 stays between 0.13 and 0.26 across clique sizes,
+worst at $k=5$, and the optimizer never recovers a full clique. Our main
+empirical contribution adapts a 2026 unfaithfulness result for
+self-explainable GNNs into a testable question for \GNNEx: once the anchor
+features are made truly constant, its feature mask still cannot reproduce
+the clean, deterministic failure of a jointly-trained extractor, but one of
+the two anchor features receives a large, class-dependent weight gap out of
+proportion to the underlying classifier's accuracy gap.
 
-Future work could address local optima with a multi-restart strategy or a
-coarse combinatorial initialization, and revisit the mean-field relaxation
-with a correctly-directed bound. The color-anchor construction offers a
-controllable way to probe post-hoc explainers for a failure mode so far
-studied mainly for self-explainable models.
+Future work could address the mistake found in the derivation, it might be
+interesting to characterize its badness or to even investigate the false 
+convexity assumption in more detail, perhaps considering
+whether there are distinguishable classes where this derivation works provably,
+or in general investigate which GNNs would fulfill the convexity assumption.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
@@ -699,8 +707,9 @@ studied mainly for self-explainable models.
 
 All experiments use Python~3.13, PyTorch~2.12, and PyTorch Geometric~2.8
 \citep{fey2019fast}. The full source code is provided as
-\texttt{gnnexplainer\_synthetic.py}. Random seeds are fixed throughout for
-reproducibility. The \GNNEx implementation in PyTorch Geometric requires
+\texttt{gnnexplainer.py} and available at
+\url{https://github.com/ArionScheid/Seminar-in-AI.git}. Random seeds are
+fixed throughout for reproducibility. The \GNNEx implementation in PyTorch Geometric requires
 specifying the explanation type (\texttt{`model'}), mask types
 (\texttt{edge\_mask\_type='object'} and \texttt{node\_mask\_type='attributes'}),
 and model configuration. Using \texttt{mode='multiclass\_classification'} with

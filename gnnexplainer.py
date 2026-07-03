@@ -1,9 +1,8 @@
 """
-gnnexplainer_synthetic.py
+gnnexplainer.py
 =========================
 Companion script for the seminar report:
-  "GNNExplainer: Instance-Level Explanations for Graph Neural Networks
-   via Mutual Information Maximization"
+  "GNNExplainer: Generating Explanations for Graph Neural Networks"
 
 Experiment: Multi-Size Clique Detection + Color Anchor
   Cliques of sizes k=3, 4, 5 are embedded in a sparse Erdos-Renyi base graph
@@ -216,9 +215,9 @@ def run_multi_clique():
 
     # Weighted loss to compensate for class imbalance
     cw = torch.tensor([1.0, n_base/n_cliq], dtype=torch.float)
-    model = GCN(data.x.size(1), 64, 2, n_layers=3)
+    model = GCN(data.x.size(1), 64, 2, n_layers=2)
     print("  Training ...")
-    model = train_model(model, data, n_epochs=300, class_weights=cw, verbose=True)
+    model = train_model(model, data, n_epochs=600, wd=5e-5, class_weights=cw, verbose=True)
     model.eval()
     with torch.no_grad():
         pred = model(data.x, data.edge_index).argmax(1)
