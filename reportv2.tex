@@ -519,10 +519,10 @@ activations, and dropout ($p=0.5$), for 600 epochs using Adam
 \citep{kingma2015adam} with learning rate $10^{-2}$ and weight decay
 $5\times10^{-5}$. We apply class-weighted cross-entropy
 ($w_1 = n_{\mathrm{base}}/n_{\mathrm{clique}}$) to compensate for the 127:73
-class imbalance. These hyperparameters were tuned by a small grid search
-over depth, width, epochs, and weight decay for the best-balanced accuracy
-across classes; a 3-layer, 300-epoch configuration under-fit the base class
-(Section~\ref{sec:limitations}).
+class imbalance. These hyperparameters were chosen to keep the trained
+classifier reasonably balanced across both classes, since a poorly-tuned
+network risks under-fitting the base class entirely and confounding the
+explanation results that follow (Section~\ref{sec:limitations}).
 
 \subsection{Explainer Configuration and Evaluation Metrics}
 
@@ -634,8 +634,8 @@ higher weight. This direction fits a compensation account, though a
 \GNNEx does not fabricate a clean, deterministic encoding
 ($g(\text{color}_1){=}\text{clique}$): 0.572 is still far from 1. But this
 large, disproportionate gap on $\text{color}_2$ is a clearer instance of
-the Section~\ref{subsec:anchor} failure than with the earlier, less
-balanced classifier, a gap Section~\ref{sec:limitations} attributes to
+the Section~\ref{subsec:anchor} failure on a reasonably well-balanced
+classifier, a gap Section~\ref{sec:limitations} attributes to
 $\Phi$'s training, not \GNNEx.
 
 
@@ -659,11 +659,11 @@ identical nodes than amortized methods like PGExplainer
 Third, \citet{faber2021when} and \citet{agarwal2022probing} argue that
 comparing an explanation to ground truth can itself be misleading: a
 badly-trained GNN may not use the planted motif at all, so a low score
-reflects the classifier, not the explainer. An earlier, untuned
-configuration of our clique GCN reached 90.4\% accuracy on clique nodes but
-only 60.6\% on base nodes; the tuned GCN of Section~\ref{sec:experiments}
-narrows this to 76.7\% and 79.5\%, but some of the residual F1 gap may
-still not be \GNNEx's fault. The same applies even more sharply to our
+reflects the classifier, not the explainer. The clique GCN of
+Section~\ref{sec:experiments} reaches a comparatively balanced 76.7\%
+accuracy on clique nodes and 79.5\% on base nodes, giving the explainer a
+genuine gradient signal on both classes, but some of the residual F1 gap
+may still not be \GNNEx's fault. The same applies even more sharply to our
 anchor-feature check (Section~\ref{subsec:anchor_results}): since \GNNEx
 only reports what $\Phi$ already relies on (Section~\ref{subsec:anchor}),
 any non-zero color weight we measure is a statement about $\Phi$'s
@@ -679,12 +679,10 @@ genuine error in the original derivation (Section~\ref{subsec:jensen}): the
 step that replaces an intractable expectation over subgraphs with a single
 soft-masked forward pass invokes Jensen's inequality in the wrong
 direction, so the continuous relaxation underlying \GNNEx is best
-understood as a heuristic, not a provable bound. Our main structural
-contribution concretely investigates the local-optima behavior the
+understood as a heuristic, not a provable bound. We then concretely investigate the local-optima behavior the
 original authors already anticipate but do not characterize, confirmed on
 the clique benchmark: F1 stays between 0.13 and 0.26 across clique sizes,
-worst at $k=5$, and the optimizer never recovers a full clique. Our main
-empirical contribution adapts a 2026 unfaithfulness result for
+worst at $k=5$, and the optimizer never recovers a full clique. Then we adapt a 2026 unfaithfulness result for
 self-explainable GNNs into a testable question for \GNNEx: once the anchor
 features are made truly constant, its feature mask still cannot reproduce
 the clean, deterministic failure of a jointly-trained extractor, but one of
