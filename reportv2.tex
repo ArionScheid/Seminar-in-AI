@@ -1,0 +1,763 @@
+\documentclass{article}
+\usepackage[final]{neurips_2022}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[colorlinks=true,bookmarksnumbered,
+            citecolor=darkblue,urlcolor=darkblue,linkcolor=darkblue]{hyperref}
+\usepackage{url,booktabs,amsfonts,nicefrac,microtype,xcolor}
+\usepackage{natbib}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx,xspace}
+\definecolor{darkblue}{rgb}{0,0,0.75}
+
+\newcommand{\GNNEx}{\textsc{GNNExplainer}\xspace}
+\newcommand{\MI}{\mathrm{MI}}
+\newcommand{\reals}{\mathbb{R}}
+\newcommand{\calG}{\mathcal{G}}
+\newcommand{\calV}{\mathcal{V}}
+\newcommand{\calE}{\mathcal{E}}
+\newcommand{\calN}{\mathcal{N}}
+\newcommand{\calY}{\mathcal{Y}}
+\newcommand{\bfA}{\mathbf{A}}
+\newcommand{\bfX}{\mathbf{X}}
+\newcommand{\bfH}{\mathbf{H}}
+\newcommand{\bfM}{\mathbf{M}}
+\newcommand{\bfm}{\mathbf{m}}
+\newcommand{\bfx}{\mathbf{x}}
+\newcommand{\bfz}{\mathbf{z}}
+\newcommand{\bfw}{\mathbf{w}}
+\newcommand{\sigmoid}{\sigma}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+\theoremstyle{definition}
+\newtheorem{problem}{Problem}
+
+\title{GNNExplainer: Generating Explanations for Graph Neural Networks}
+
+\author{%
+  Arion Scheid\\
+  Department of Computer Science\\
+  TU Wien\\
+  Vienna, Austria\\
+} 
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Graph Neural Networks (GNNs) achieve strong performance on graph-structured data
+but are largely opaque: it is unclear which nodes, edges, or features drive a
+given prediction. This paper examines \GNNEx \citep{ying2019gnnexplainer}, a
+post-hoc method that finds the compact subgraph and feature subset that maximize
+mutual information with a trained model's prediction. We present a
+self-contained derivation of this objective and its continuous relaxation into
+learned edge and feature masks, including a step we show is mis-stated in the
+original derivation, connecting it to the practical optimization implemented
+in PyTorch Geometric \citep{fey2019fast}. We study two failure modes. First,
+gradient-based mask optimization can become trapped in local optima; on a
+novel multi-size clique dataset, explanation F1 drops from 0.12 for triangles
+to 0.00 for 5-cliques. Second, motivated by 2026 work showing that
+jointly-trained \emph{self-explainable} GNNs can produce explanations
+provably unrelated to a model's actual reasoning
+\citep{azzolin2026gnnexplanations}, we add two constant, label-independent
+color features to the clique dataset and test whether \GNNEx's feature
+mask mistakes either one for a real signal. We find only a weak and
+inconsistent version of this failure: the mask does not fully suppress
+either feature, but the class-dependent gap is small and does not track
+which class the classifier finds harder to predict.
+\end{abstract}
+
+
+\section{Introduction}
+
+Graph Neural Networks have become the standard approach for learning on
+graph-structured data, with applications in molecular property prediction,
+fraud detection, and scientific knowledge graphs. Despite their success, GNNs
+are black boxes: a prediction cannot easily be traced to specific input
+elements. This is not merely an aesthetic concern, since a predicted
+toxicity must be linked to a functional group to guide synthesis, and a
+flagged transaction must be auditable for regulators.
+
+The general problem of explaining black-box predictions has been studied
+extensively \citep{lipton2018mythos}, but standard tools such as LIME
+\citep{ribeiro2016should} and SHAP \citep{lundberg2017unified} treat inputs as
+flat feature vectors and cannot account for graphs' relational structure, so a
+dedicated method is needed.
+
+\GNNEx \citep{ying2019gnnexplainer} fills this gap. Given any trained GNN and a
+node to explain, it identifies the minimal subgraph and node feature subset
+that best account for the prediction, by maximizing \emph{mutual information}
+with the model's output: a good explanation, fed to the frozen GNN alone,
+reproduces the original prediction as confidently as possible. \GNNEx
+operationalizes this with a continuous, differentiable \emph{mask} over the
+edges and features of the local computation graph, optimized by gradient
+descent. The method is post-hoc and model-agnostic: it works on any GNN
+without retraining, and the GNN's parameters stay \emph{frozen} throughout.
+
+This paper makes four contributions. First, we derive the mutual information
+objective from scratch, identifying a step in the original derivation where
+Jensen's inequality is applied in the wrong direction
+(Section~\ref{subsec:jensen}). Second, we concretely investigate the
+local-optima behavior that \citet{ying2019gnnexplainer} already anticipate
+but do not characterize: when it settles on sub-cliques or sub-motifs that
+are locally but not globally optimal. Third, we connect \GNNEx to 2026 work
+on \emph{self-explainable} GNNs showing that some explanation mechanisms
+can be provably unrelated to a model's actual reasoning, adapting this
+construction into a testable hypothesis for \GNNEx. Fourth, we implement
+\GNNEx on a multi-size clique benchmark with known ground-truth
+explanations, demonstrating the local-optima behavior and empirically
+testing whether the unfaithfulness failure above also affects \GNNEx's
+feature mask.
+
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Graph Neural Networks.}
+The message-passing framework of \citet{gilmer2017neural} unifies most GNN
+architectures. Examples of such are GCN (Graph Convolutional Networks) of \citet{kipf2017semi} which use symmetric normalized
+aggregation or GAT (Graph Attention Networks) of \citet{velickovic2018graph} which use learned
+attention weights, sometimes interpreted as explanations (as in \cite{ying2019gnnexplainer}), though
+\citet{jain2019attention} show high attention on an edge does not imply that
+edge is necessary for the prediction.
+
+\paragraph{GNN Explanation Methods.}
+A comprehensive taxonomy of GNN explanation methods is provided by
+\citet{yuan2022explainability}. Among instance-level methods, \GNNEx
+\citep{ying2019gnnexplainer} is the seminal, most widely cited method and
+the primary reference for this paper. \citet{li2020explain}
+extend the idea to weighted graphs. PGExplainer \citep{luo2020parameterized}
+addresses \GNNEx's consistency limitation with a shared generative model
+instead of a separate optimization per instance. SubgraphX
+\citep{yuan2021explainability} avoids gradient-based optimization entirely,
+searching combinatorially instead. XGNN
+\citep{yuan2020xgnn} trains a graph generator at the model level.
+
+\paragraph{Evaluation of GNN Explanations.}
+A substantial literature asks not how to produce GNN explanations but
+whether to trust them. \citet{faber2021when}, on evaluation methodology,
+identify five pitfalls in comparing explanations to planted ground truth
+(Section~\ref{sec:limitations}), and \citet{agarwal2022probing} give the
+first theoretical reliability analysis, bounding faithfulness, stability,
+and fairness. This report sits in the same field: Section~\ref{sec:results}
+applies both papers' cautions to our results, and Section~\ref{subsec:anchor}
+extends the same question to a construction from
+\citet{azzolin2026gnnexplanations}, discussed next.
+
+\paragraph{Self-Explainable GNNs and Unfaithful Explanations.}
+\citet{azzolin2026gnnexplanations} study this question for
+\emph{self-explainable} GNNs (SE-GNNs). An SE-GNN couples an
+\emph{explanation extractor} $e$, mapping an input graph to a subgraph
+$e(G) = R \subseteq G$, with a \emph{classifier} $g$ that predicts from $R$
+alone, so the full model is $f(G) = g(e(G))$; GSAT \citep{miao2022gsat} is a
+representative instance. Since $e$ and $g$ train jointly, $e$ can discard the
+information $g$ needs and instead report a recurrent, non-discriminative
+pattern: an \emph{anchor set} $Z = \{z_y\}_{y \in \calY}$ of single-node
+subgraphs, one per class, with $z_y \subseteq G$ in \emph{every} instance $G$
+(Appendix~\ref{app:rbgv} gives a worked example). High accuracy therefore
+cannot certify that an SE-GNN's explanation reflects its real computation.
+Section~\ref{subsec:anchor} asks whether a weaker analogue of this result
+survives for post-hoc explainers such as \GNNEx.
+
+
+\section{Background: Graph Neural Networks}
+\label{sec:background}
+
+A graph is a tuple $\calG = (\calV, \calE, \bfX)$ with node set $\calV$ of
+size $n = |\calV|$, edge set $\calE$, and node feature matrix
+$\bfX \in \reals^{n \times d}$, where $d$ is the number of features per node.
+The adjacency matrix $\bfA \in \{0,1\}^{n \times n}$ encodes the edge set. We
+assume undirected graphs throughout and write
+$\calN(v) = \{u \in \calV : (v,u) \in \calE\}$ for the neighbors of node $v$.
+
+GNNs are trained for a classification objective: given $\calG$, predict a
+label from a fixed set of $C$ classes $\{1, \dots, C\}$. This prediction can
+be made at several levels. Node classification predicts a true label
+$y_v \in \{1, \dots, C\}$ for every node $v \in \calV$. Link prediction
+predicts a label for every pair of nodes. Graph classification predicts a
+single label for the whole graph. We focus on node classification
+throughout, following \citet{kipf2017semi}.
+
+A $K$-layer GNN, which we denote $\Phi$, computes node embeddings by
+iterating the message-passing scheme of \citet{gilmer2017neural}. At layer
+$k$, each node $v$ first aggregates information from its neighbors and then
+updates its own representation:
+\begin{align}
+  \bfm_v^{(k)} &= \mathrm{AGG}^{(k)}\!\bigl(
+    \{\phi^{(k)}(\bfH_v^{(k-1)}, \bfH_u^{(k-1)}, \bfA_{vu})
+      : u \in \calN(v)\}\bigr), \label{eq:agg} \\
+  \bfH_v^{(k)} &= \mathrm{UPDATE}^{(k)}\!\bigl(\bfH_v^{(k-1)},
+                                                 \bfm_v^{(k)}\bigr),
+  \label{eq:update}
+\end{align}
+with initialization $\bfH_v^{(0)} = \bfX_v$, the raw node features. Here
+$\bfH_v^{(k)} \in \reals^{d_k}$ is the \emph{hidden representation}
+(embedding) of node $v$ after $k$ layers. $\bfm_v^{(k)}$ is the
+\emph{aggregated message} received from $v$'s neighbors at layer $k$.
+$\phi^{(k)}$ is a learnable function, for example a linear transformation,
+that combines a pair of node embeddings with the edge weight $\bfA_{vu}$.
+$\mathrm{AGG}^{(k)}$ is a permutation-invariant aggregation function over the
+neighbor set, for example a sum or mean. $\mathrm{UPDATE}^{(k)}$ combines the
+current node embedding $\bfH_v^{(k-1)}$ with the incoming message
+$\bfm_v^{(k)}$, typically with a linear layer followed by a non-linearity.
+
+The final embedding $\bfH_v^{(K)}$ is passed through a softmax layer that
+outputs a probability $P_\Phi(Y\!=\!c \mid \calG, \bfX)$ for each class $c$,
+where $Y$ is the random variable representing the label $\Phi$ predicts for
+$v$. The predicted label is the most probable class,
+\begin{equation}
+  \hat{y}_v = \argmax_{c \in \{1,\dots,C\}} P_\Phi(Y\!=\!c \mid \calG, \bfX).
+  \label{eq:pred}
+\end{equation}
+
+A critical structural property is that $\hat{y}_v$ depends only on the
+$K$-hop neighborhood of $v$. We call this neighborhood the
+\emph{computation graph} $\calG_c^v$, with associated features $\bfX_c^v$.
+All nodes and edges outside $\calG_c^v$ are irrelevant to $\hat{y}_v$, so
+$P_\Phi(Y\!=\!c \mid \calG, \bfX) = P_\Phi(Y\!=\!c \mid \calG_c^v, \bfX_c^v)$:
+only $\calG_c^v$ matters for explaining $\hat{y}_v$.
+
+
+\section{GNNExplainer}
+\label{sec:method}
+
+\subsection{Problem Formulation}
+
+The GNN $\Phi$ of Section~\ref{sec:background} is trained once and then kept
+\emph{frozen} during explanation. The goal is to identify the part of the
+computation graph $\calG_c^v$ that best explains the prediction $\hat{y}_v$.
+
+\begin{problem}[Instance-Level GNN Explanation \citep{ying2019gnnexplainer}]
+Given $\Phi$, a computation graph $\calG_c^v$ with features $\bfX_c^v$, and
+prediction $\hat{y}_v$, find a subgraph $\calG_S \subseteq \calG_c^v$ and a
+masked feature matrix $\bfX_S^F$ such that $(\calG_S, \bfX_S^F)$ is most
+\emph{informative} about $\hat{y}_v$, i.e., knowing $(\calG_S, \bfX_S^F)$
+reduces uncertainty about $\hat{y}_v$ as much as possible.
+\end{problem}
+
+\subsection{Information-Theoretic Preliminaries}
+
+\GNNEx formalizes ``most informative'' using \emph{mutual information}. We
+first define the necessary information-theoretic quantities for the random
+variable $Y$ of Eq.~\eqref{eq:pred}, which ranges over the $C$ classes
+$\{1,\dots,C\}$ of Section~\ref{sec:background}.
+
+The \emph{Shannon entropy} measures the uncertainty of~$Y$:
+\begin{equation}
+  H(Y) = -\sum_{c=1}^{C} P(Y\!=\!c)\,\log P(Y\!=\!c).
+  \label{eq:entropy}
+\end{equation}
+$H(Y) \geq 0$, with equality only when one class has probability~1 (no
+uncertainty), and is maximized when all classes are equally likely.
+The \emph{conditional entropy} measures the residual uncertainty in~$Y$
+after observing evidence~$Z$:
+\begin{equation}
+  H(Y \mid Z) = -\sum_{c=1}^{C} P(Y\!=\!c \mid Z)\,\log P(Y\!=\!c \mid Z),
+  \label{eq:cond_entropy_def}
+\end{equation}
+with $H(Y \mid Z) \leq H(Y)$: conditioning on informative evidence can
+only reduce uncertainty.  \emph{Mutual information} quantifies this
+reduction:
+\begin{equation}
+  \MI(Y;\, Z) = H(Y) - H(Y \mid Z) \;\geq\; 0.
+  \label{eq:mi_def}
+\end{equation}
+A high value of $\MI(Y; Z)$ means observing $Z$ makes $Y$ substantially
+more predictable.  For example, a confident 3-class prediction $P =
+(0.9, 0.05, 0.05)$ has $H \approx 0.47$\,bits, while a near-uniform
+prediction $P = (0.33, 0.33, 0.34)$ has $H \approx 1.10$\,bits.
+
+\subsection{Mutual Information Objective}
+
+\GNNEx seeks the explanation $(\calG_S, \bfX_S^F)$ that maximizes the mutual
+information between $Y$ and this evidence:
+\begin{equation}
+  \max_{\calG_S \subseteq \calG_c^v}\ \MI\bigl(Y;\, (\calG_S, \bfX_S^F)\bigr)
+  = \underbrace{H(Y)}_{\text{constant}} - H\bigl(Y \mid \calG\!=\!\calG_S,\,
+                                       \bfX\!=\!\bfX_S^F\bigr).
+  \label{eq:mi}
+\end{equation}
+Since $\Phi$ is fixed, $H(Y)$ is a constant.  Maximizing MI is therefore
+equivalent to \emph{minimizing the conditional entropy}, that is, finding the
+subgraph that keeps the GNN most confident:
+\begin{equation}
+  \min_{\calG_S,\, \bfX_S^F}\ H\bigl(Y \mid \calG\!=\!\calG_S,\,
+                                       \bfX\!=\!\bfX_S^F\bigr)
+  = -\sum_{c=1}^{C} P_\Phi(Y\!=\!c \mid \calG_S, \bfX_S^F)\,
+    \log P_\Phi(Y\!=\!c \mid \calG_S, \bfX_S^F).
+  \label{eq:cond_ent}
+\end{equation}
+This uses the \textbf{entire softmax distribution} over all $C$ classes and
+penalizes any residual uncertainty.
+
+\paragraph{Class-specific formulation.}
+In practice, the GNN's predicted label $\hat{y}_v = c^*$ is known.
+\citet{ying2019gnnexplainer} replace the full conditional entropy with a
+\emph{cross-entropy targeted at $c^*$}:
+\begin{equation}
+  \min_{\calG_S,\, \bfX_S^F}\;
+  -\log P_\Phi\bigl(Y\!=\!c^* \mid \calG\!=\!\calG_S,\,
+  \bfX\!=\!\bfX_S^F\bigr).
+  \label{eq:class_specific}
+\end{equation}
+While Eq.~\eqref{eq:cond_ent} asks \emph{``Is the GNN confident?''} across all
+classes, Eq.~\eqref{eq:class_specific} asks \emph{``Does $\calG_S$ support
+predicting~$c^*$?''} by only looking at $P(Y\!=\!c^*)$. The two agree when
+the GNN is highly confident. Eq.~\eqref{eq:class_specific} is simpler,
+directly interpretable as the standard cross-entropy loss used in
+classification, and is the form implemented in PyTorch Geometric.
+
+\subsection{Mask Parameterization}
+\label{subsec:maskparam}
+
+Searching over all $2^{|\calE_c^v|}$ subgraphs by brute force is intractable.
+\GNNEx sidesteps this with continuous \emph{masks}: real-valued scalars (one
+per edge or feature dimension) passed through a sigmoid to produce soft
+weights in $(0,1)$, optimized jointly by gradient descent, with the final
+discrete subgraph recovered by thresholding.
+
+\paragraph{Edge mask.}
+An \emph{edge mask} is a real-valued matrix $\bfM_A \in \reals^{n \times n}$
+learned with one entry per edge in $\calG_c^v$. Applying the sigmoid $\sigmoid(\cdot)$
+gives a soft weight in $(0,1)$, and the masked adjacency is:
+\begin{equation}
+  \bfA_S[i,j] = \bfA[i,j] \cdot \sigmoid\!\bigl(\bfM_A[i,j]\bigr),
+  \quad (i,j) \in \calE_c^v.
+  \label{eq:edge_mask}
+\end{equation}
+This soft-masked adjacency replaces the binary one in all GNN message-passing
+computations, maintaining differentiability. In practice, the objective in
+Eq.~\eqref{eq:class_specific} is evaluated by a single forward pass through
+the soft-weighted graph. This is a mean-field approximation, discussed in
+Section~\ref{sec:limitations}.
+
+\paragraph{Feature mask.}
+\citet{ying2019gnnexplainer} intend the feature mask $F \in \{0,1\}^d$ as a
+\emph{binary} selector, $\bfx_j^F = \bfx_j \odot F$. They warn against
+naively relaxing $F$ to a continuous $\sigmoid(\bfm_F) \in (0,1)^d$
+multiplied directly into $\bfx_j$, as done for the edge mask
+(Eq.~\ref{eq:edge_mask}): an important feature whose value is already close
+to zero becomes indistinguishable from an unimportant one, since scaling it
+near zero either way gives almost no gradient signal about its true
+importance. Their proposed fix, a marginal-distribution reparametrization
+trick, is summarized in Appendix~\ref{app:featmask}.
+
+The PyTorch Geometric implementation used in our experiments
+(\texttt{node\_mask\_type='attributes'}) skips this reparametrization entirely.
+It learns an unconstrained mask $\bfM_F \in \reals^{n \times d}$ (one entry per
+node \emph{and} feature, not shared across nodes as originally proposed) and
+applies it exactly like the edge mask,
+\begin{equation}
+  \bfX_S^F = \bfX_c^v \odot \sigmoid(\bfM_F),
+  \label{eq:feat_mask}
+\end{equation}
+i.e., the same near-zero-value blind spot is present in the library. A
+practitioner explaining informative small-valued features should be aware
+\GNNEx may under-report their importance; every node feature in our
+experiments is a $0/1$ indicator, however, so this case does not arise and
+Eq.~\eqref{eq:feat_mask} is adequate for our purposes.
+
+\subsection{From a Discrete Search to a Single Forward Pass: A Flawed Step}
+\label{subsec:jensen}
+
+Eqs.~\eqref{eq:cond_ent}--\eqref{eq:class_specific} still require searching over
+discrete subgraphs $\calG_S$. \citet{ying2019gnnexplainer} make this tractable
+by treating $\calG_S \sim \mathcal{Q}$ as a random variable drawn from a
+distribution $\mathcal{Q}$ over subgraphs, and by minimizing
+$\mathbb{E}_{\calG_S \sim \mathcal{Q}}\bigl[H(Y \mid \calG_S, \bfX_S^F)\bigr]$.
+They then invoke \emph{Jensen's inequality} which
+states that for a convex\footnote{A function $\varphi$ is \emph{convex} when
+$\varphi(\lambda a + (1{-}\lambda)b) \leq \lambda\varphi(a) + (1{-}\lambda)\varphi(b)$
+for all $a,b$ in its domain and $\lambda\in[0,1]$.} $\varphi$ and a random variable $Z$ taking values in
+its domain, $\varphi(\mathbb{E}[Z]) \leq \mathbb{E}[\varphi(Z)]$. Here
+$\varphi = H(Y\mid\cdot,\bfX_S^F)$ is regarded as a function of the fractional
+adjacency matrix $\bfA_S$ of Eq.~\eqref{eq:edge_mask}. Ying et al.\ use this
+to replace the expectation above with
+$H\bigl(Y \mid \mathbb{E}_{\mathcal{Q}}[\calG_S], \bfX_S^F\bigr)$, licensing
+the single soft-masked forward pass of Eq.~\eqref{eq:edge_mask} in place of
+an intractable average; they state that, ``with convexity assumption,''
+this substitution is an \emph{upper} bound on the original expectation.
+
+This is backwards. Under the very convexity assumption invoked (that
+$H(Y \mid \calG_S, \cdot)$ is convex in $\calG_S$), Jensen's inequality actually
+gives $H(Y \mid \mathbb{E}_{\mathcal{Q}}[\calG_S], \bfX_S^F) \leq
+\mathbb{E}_{\mathcal{Q}}\bigl[H(Y \mid \calG_S, \bfX_S^F)\bigr]$: a \emph{lower}
+bound, not an upper one, and minimizing a lower bound gives no guarantee about
+the quantity of actual interest. Worse, the authors immediately note that
+``due to the complexity of neural networks, the convexity assumption does not
+hold'' for the models \GNNEx targets, so even the mislabeled bound lacks a
+valid premise. This step has no rigorous justification; we adopt it only
+because it is what every practical implementation optimizes, and because
+its value rests on strong empirical results (Section~\ref{sec:results}),
+not on the derivation.
+
+\subsection{Optimization Objective}
+
+Substituting the mask-parameterized adjacency (Eq.~\ref{eq:edge_mask}) and
+features (Eq.~\ref{eq:feat_mask}) into the class-specific formulation
+(Eq.~\ref{eq:class_specific}), the full objective adds sparsity and
+discreteness regularization:
+\begin{align}
+  \min_{\bfM_A,\, \bfM_F}\;
+  -\log P_\Phi(\hat{y}_v \mid \bfA_S, \bfX_S^F)
+  &+ \alpha_1 \!\sum_{(i,j)}\! \sigmoid(\bfM_A[i,j])
+   + \alpha_2 \!\sum_{(i,j)}\! H\!\bigl(\sigmoid(\bfM_A[i,j])\bigr)
+  \nonumber\\
+  &+ \alpha_3 \sum_{v,k} \sigmoid(\bfM_F[v,k])
+   + \alpha_4 \sum_{v,k} H\!\bigl(\sigmoid(\bfM_F[v,k])\bigr),
+  \label{eq:full_obj}
+\end{align}
+where $H(p) = -p\log p - (1-p)\log(1-p)$. The $\ell_1$ terms ($\alpha_1,
+\alpha_3$) enforce sparsity; the binary-entropy terms ($\alpha_2, \alpha_4$)
+push mask values toward 0 or 1. The final subgraph is obtained by thresholding
+the edge mask at 0.5 or retaining the top-$K$ edges.
+
+\subsection{Local Optima in the Mask Optimization}
+\label{subsec:localopt}
+
+Because \GNNEx solves Eq.~\eqref{eq:full_obj} by gradient descent, explanation
+quality depends on which local optimum the optimizer reaches.
+\citet{ying2019gnnexplainer} already anticipate this: since their objective
+is non-convex (Section~\ref{subsec:jensen}), gradient descent finds only
+\emph{some} local minimum, which they report empirically tends to be a
+high-quality explanation. This is therefore not a new discovery; our
+contribution is a concrete investigation of when it instead settles on a
+poor one, particularly when every strict sub-structure of the correct
+explanation already maintains reasonable \emph{prediction confidence}, the
+probability assigned to the predicted class.
+
+Consider a node $v$ in a $k$-clique in a sparse graph, where the GNN assigns
+high confidence to class~1 whenever the local neighborhood is dense. A
+triangle (3-clique) embedded within the $k$-clique is already denser than
+the Erd\H{o}s-R\'{e}nyi \citep{erdos1959random} background, so the triangle
+alone may already preserve confident class-1 prediction. The gradient of
+Eq.~\eqref{eq:full_obj} is then small: removing a triangle edge would
+decrease confidence, and the entropy regularization discourages adding
+more. The optimizer stops at this \emph{sub-clique local minimum} even
+though the true explanation is the full $k$-clique, and as $k$ grows, the
+number of competing sub-clique local optima grows exponentially. A weak
+classifier compounds this: if the GNN does not reliably predict clique
+nodes, the gradient signal is small throughout, and convergence to any
+meaningful explanation becomes unlikely.
+
+\subsection{Anchor Features and Unfaithful Explanations in \GNNEx}
+\label{subsec:anchor}
+
+The unfaithfulness result reviewed in Section~\ref{sec:related} concerns
+SE-GNNs, where $e$ and $g$ are optimized jointly. \GNNEx has no such
+freedom, so we state the mechanism precisely for our setting, to fix what
+\emph{would} constitute the same failure here and motivate a testable,
+weaker analogue.
+
+\citet{azzolin2026gnnexplanations} study graph classification, where anchor
+\emph{nodes} recur across every graph. A set of anchor nodes need not lie
+inside a given node's computation graph $\calG_c^v$ (Section~\ref{sec:background}),
+so it cannot serve as a node-level anchor in general, unlike a node
+\emph{feature}, which is present at every node. This is why we use color,
+not designated nodes, below.
+
+Augment the multi-size clique dataset with two constant \emph{color}
+features per node, $\text{color}_1 \equiv 1$ and $\text{color}_2 \equiv 2$,
+taking the exact same value on \emph{every} node. Both are anchor features
+(Section~\ref{sec:related}): $\text{color}_1 = 1$ and $\text{color}_2 = 2$
+hold for every node $v \in \calV$ regardless of its true label
+$y_v \in \{0,1\}$, so neither carries any information about clique
+membership. A hypothetical SE-GNN pair $(e,g)$ could still reach perfect
+accuracy while reporting only one of these two, always-true facts as its
+explanation. Let $e(v) := \{v,\text{color}_1\}$ whenever $v$ truly belongs
+to a clique, determined by $e$ examining the \emph{entire} graph internally,
+and $e(v) := \{v,\text{color}_2\}$ otherwise. With
+$g(\text{color}_1)=\text{clique}$ and $g(\text{color}_2)=\text{non-clique}$,
+$f=g\circ e$ gives $f(G) = g(e(G)) = g(\text{color}_1) = \text{clique}$ for
+every clique node. This is an instance of Theorem~1 of
+\citet{azzolin2026gnnexplanations}: $f$ is perfectly accurate, yet its
+reported explanation, identically true for every node in the graph, is
+entirely unrelated to the true decision-relevant structure, visible only
+inside $e$'s hidden computation and never revealed.
+
+\GNNEx cannot build this encoding, since $\Phi$ is fixed and there is no $e$
+to optimize: this is exactly what separates a post-hoc explainer from an
+SE-GNN. In Theorem~1, the failure lives in the \emph{joint training} of
+$(e,g)$, so it occurs regardless of how $\Phi$ treats the anchor set; a
+post-hoc explainer can only report what an already-trained $\Phi$ does. Any
+anchor-style failure here must therefore already exist inside $\Phi$
+itself, whether the anchor is a set of graph-level nodes
+\citep{azzolin2026gnnexplanations} or our node-level features: an
+ideally-trained $\Phi$ would ignore them, and \GNNEx would then ignore them
+too. If $\Phi$'s training instead assigns any non-zero, spuriously small
+weight to $\text{color}_1$ or $\text{color}_2$, \GNNEx's feature mask has a
+real gradient to exploit, and the mean-field optimizer, already prone to
+local optima (Section~\ref{subsec:localopt}), may inflate that weight into
+an unfaithful explanation. We test this next.
+
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Synthetic Dataset}
+
+\paragraph{Multi-Size Clique Detection with a Color Anchor.}
+To study local optima, we embed cliques of sizes 3, 4, and 5 in a single sparse
+Erd\H{o}s-R\'{e}nyi graph \citep{erdos1959random} with $n=200$ nodes, each
+pair independently connected with probability $p=0.02$: 8 triangles,
+6 four-cliques, and 5 five-cliques, covering 73 of the 200 nodes. Labels are
+binary (0 = non-clique, 1 = clique node). Node features are two constant
+\emph{color} features, $\text{color}_1 \equiv 1$ and $\text{color}_2 \equiv
+2$, with the same value on every node. These are the anchor features of
+Section~\ref{subsec:anchor}, uninformative about the label by construction.
+The ground-truth explanation for a node in a $k$-clique consists of the
+$\binom{k}{2}$ undirected edges of that clique.
+
+This setting exposes the local-optima behavior of Section~\ref{subsec:localopt}:
+a triangle embedded in a 5-clique is already a locally consistent
+explanation, yet represents only 3 of the 10 true explanatory edges.
+
+\subsection{GNN Architecture and Training}
+
+We train a 3-layer GCN \citep{kipf2017semi} with 64 hidden units, ReLU
+activations, and dropout ($p=0.5$), for 300 epochs using Adam
+\citep{kingma2015adam} with learning rate $10^{-2}$ and weight decay
+$5\times10^{-4}$. We apply class-weighted cross-entropy
+($w_1 = n_{\mathrm{base}}/n_{\mathrm{clique}}$) to compensate for the 127:73
+class imbalance.
+
+\subsection{Explainer Configuration and Evaluation Metrics}
+
+We use the \GNNEx implementation in PyTorch Geometric \citep{fey2019fast},
+run for 150 gradient-descent steps per node at learning rate $10^{-2}$, learning
+both edge and node-feature attribute masks.
+
+\paragraph{Classification accuracy.}
+We first verify the GNN itself by reporting \emph{accuracy}: the fraction of
+correctly classified nodes, $\mathrm{Acc} = |\{v : \hat{y}_v = y_v\}| / |\calV|$.
+
+\paragraph{Explanation quality.}
+Edges with mask weight $\sigmoid(\bfM_A[i,j]) > 0.5$ are \emph{selected}; the
+rest are discarded. Let $S$ be the selected edge set and $T$ the ground-truth
+edge set for a given node. We report precision, recall, and their harmonic
+mean F1:
+\begin{equation}
+  P = \frac{|S \cap T|}{|S|}, \qquad
+  R = \frac{|S \cap T|}{|T|}, \qquad
+  F_1 = \frac{2PR}{P + R}.
+  \label{eq:f1}
+\end{equation}
+\citet{azzolin2026gnnexplanations} review alternative faithfulness metrics
+that probe an explanation by perturbing the graph rather than comparing to
+ground truth (e.g., Fidelity, or their own EST metric), and
+\citet{faber2021when} and \citet{agarwal2022probing} argue such comparison
+can itself be misleading (Section~\ref{sec:limitations}). We use F1 against
+the known planted ground truth anyway, as it remains the most widely
+reported metric on synthetic benchmarks with known explanations.
+
+We additionally report the \emph{explanation clique size}: the largest clique
+found among the true clique nodes in the thresholded explanation subgraph
+(via \texttt{networkx.find\_cliques}).
+
+\paragraph{Anchor-feature (color) weight.}
+\GNNEx optimizes a separate feature mask for each explained node; write
+$\bfM_F^{(v)}$ for the mask learned while explaining $v$
+(Eq.~\ref{eq:feat_mask}), and
+$\bfw_v := \sigmoid\bigl(\bfM_F^{(v)}[v,:]\bigr) \in (0,1)^2$ for $v$'s own
+row of it, the weight \GNNEx assigns to $v$'s own $\text{color}_1$ and
+$\text{color}_2$ entries. A faithful explainer should assign $\bfw_v$ a low
+value that does not depend on $v$'s class. A class-dependent asymmetry,
+e.g., a high $\text{color}_1$ weight on clique nodes paired with a high
+$\text{color}_2$ weight on non-clique nodes, would be a soft version of the
+deterministic encoding constructed in Section~\ref{subsec:anchor}, though
+Section~\ref{sec:limitations} argues this would indict $\Phi$'s training,
+not \GNNEx.
+
+
+\section{Results and Discussion}
+\label{sec:results}
+
+\subsection{Multi-Size Clique Detection}
+
+The GCN reaches 71.5\% overall accuracy: 90.4\% on clique nodes but only
+60.6\% on base nodes, so the class-weighted loss favors confidently
+detecting cliques at the cost of base-node accuracy, which directly affects
+the explainer.
+
+Table~\ref{tab:results} shows a sharp degradation with clique size: F1
+falls from 0.124 ($k=3$) to 0.000 for $k=4$ and $k=5$, where the optimizer
+recovers no edge within the true clique. This confirms the local-optima
+mechanism of Section~\ref{subsec:localopt}: for $k=3$ the target has only 3
+edges, so the optimizer sometimes reaches it before converging, while for
+larger cliques any single clique edge is already a locally sufficient
+explanation.
+
+\begin{table}[t]
+  \centering
+  \caption{Explanation accuracy on the clique benchmark.
+    Edges are thresholded at mask weight $>0.5$.
+    F1 values are mean $\pm$ std over all explained nodes.
+    ``Expl.\ clique'' reports the average size of the largest clique
+    recovered among the true clique nodes in the explanation subgraph.}
+  \label{tab:results}
+  \smallskip
+  \begin{tabular}{lcccc}
+    \toprule
+    Clique size & Precision & Recall & F1 & Expl.\ clique \\
+    \midrule
+    $k=3$ (triangles)  & 0.174 & 0.097 & $0.124 \pm 0.204$ & 1.29 / 3 \\
+    $k=4$              & 0.000 & 0.000 & $0.000 \pm 0.000$ & 1.00 / 4 \\
+    $k=5$              & 0.000 & 0.000 & $0.000 \pm 0.000$ & 1.00 / 5 \\
+    All clique nodes   & 0.073 & 0.041 & $0.052 \pm 0.146$ & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Anchor-Feature (Color) Results}
+\label{subsec:anchor_results}
+
+We measure the mean color-feature weight $\bfw_v$ (Section~\ref{sec:experiments})
+over 57 explained clique nodes and 50 explained non-clique nodes. A faithful
+explainer would assign both $\text{color}_1$ and $\text{color}_2$ a weight
+close to 0, equally for both classes, since both are constant and carry no
+information about $y_v$. Neither is suppressed to near zero: clique nodes
+receive $\text{color}_1=0.186$ and $\text{color}_2=0.266$, and non-clique
+nodes receive $\text{color}_1=0.188$ and $\text{color}_2=0.235$, so the
+default regularization does not drive a genuinely irrelevant feature to 0
+within 150 steps.
+
+The class-dependent gap, however, is small: $\text{color}_1$ shows
+essentially none (0.186 vs.\ 0.188), and $\text{color}_2$ shows only a
+modest one (0.266 vs.\ 0.235) that does not track classifier confidence as a
+compensation account would predict, since clique nodes are now the
+\emph{easier} class (90.4\% vs.\ 60.6\% accuracy) yet receive the higher
+weight. \GNNEx is thus only weakly susceptible to the
+Section~\ref{subsec:anchor} failure once the anchor feature is made truly
+constant: it does not fabricate a clean, deterministic encoding
+($g(\text{color}_1){=}\text{clique}$), but the small, unexplained gap on
+$\text{color}_2$ shows it is not perfectly faithful either, a gap
+Section~\ref{sec:limitations} attributes to $\Phi$'s training rather than
+\GNNEx.
+
+
+\section{Limitations}
+\label{sec:limitations}
+
+Three further limitations qualify our results. First, the mean-field
+relaxation (Section~\ref{subsec:jensen}) evaluates a soft-masked graph
+outside the binary-adjacency distribution $\Phi$ was trained on: $\Phi$
+never saw an edge held at half-strength, so its behavior there is
+unconstrained and may not match how it would behave if that edge were
+genuinely removed. The explanation may therefore reflect an effective model
+that differs from $\Phi$ \citep{yuan2022explainability};
+\citet{agarwal2022probing} show this introduces a bounded but non-zero
+faithfulness gap. Second, each \GNNEx call is an independent optimization
+with no principled way to set $\alpha_1,\ldots,\alpha_4$
+(Eq.~\ref{eq:full_obj}), making it less stable across structurally
+identical nodes than amortized methods like PGExplainer
+\citep{luo2020parameterized}.
+
+Third, \citet{faber2021when} and \citet{agarwal2022probing} argue that
+comparing an explanation to ground truth can itself be misleading: a
+badly-trained GNN may not use the planted motif at all, so a low score
+reflects the classifier, not the explainer. Our clique GCN reaches 90.4\%
+accuracy on clique nodes but only 60.6\% on base nodes, so some of the F1
+gap may not be \GNNEx's fault. The same applies even more sharply to our
+anchor-feature check (Section~\ref{subsec:anchor_results}): since \GNNEx
+only reports what $\Phi$ already relies on (Section~\ref{subsec:anchor}),
+any non-zero color weight we measure is a statement about $\Phi$'s
+training, not \GNNEx. We report it anyway, for simplicity and because
+evaluating faithfulness metrics is not this report's focus.
+
+
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+We have presented a detailed study of \GNNEx. Along the way we identified a
+genuine error in the original derivation (Section~\ref{subsec:jensen}): the
+step that replaces an intractable expectation over subgraphs with a single
+soft-masked forward pass invokes Jensen's inequality in the wrong
+direction, so the continuous relaxation underlying \GNNEx is best
+understood as a heuristic, not a provable bound. Our main structural
+contribution concretely investigates the local-optima behavior the
+original authors already anticipate but do not characterize, confirmed on
+the clique benchmark: F1 drops from 0.12 for triangles to 0.00 for
+5-cliques. Our main empirical contribution adapts a 2026 unfaithfulness
+result for self-explainable GNNs into a testable question for \GNNEx: once
+the anchor features are made truly constant, its feature mask cannot
+reproduce the clean, deterministic failure of a jointly-trained extractor,
+and only a weak, partly unexplained trace survives.
+
+Future work could address local optima with a multi-restart strategy or a
+coarse combinatorial initialization, and revisit the mean-field relaxation
+with a correctly-directed bound. The color-anchor construction offers a
+controllable way to probe post-hoc explainers for a failure mode so far
+studied mainly for self-explainable models.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+
+\section{Implementation Details}
+\label{app:impl}
+
+All experiments use Python~3.13, PyTorch~2.12, and PyTorch Geometric~2.8
+\citep{fey2019fast}. The full source code is provided as
+\texttt{gnnexplainer\_synthetic.py}. Random seeds are fixed throughout for
+reproducibility. The \GNNEx implementation in PyTorch Geometric requires
+specifying the explanation type (\texttt{`model'}), mask types
+(\texttt{edge\_mask\_type='object'} and \texttt{node\_mask\_type='attributes'}),
+and model configuration. Using \texttt{mode='multiclass\_classification'} with
+two output classes handles binary classification without requiring changes to the
+GCN output layer. As verified against the library source
+(\texttt{torch\_geometric/explain/algorithm/gnn\_explainer.py}), the
+\texttt{'attributes'} mask type creates one learnable weight per node \emph{and}
+feature (Eq.~\ref{eq:feat_mask}), which is what we read out per node to obtain
+the color-anchor weights of Section~\ref{subsec:anchor_results}.
+
+\section{Feature-Mask Reparametrization: The Original Proposal}
+\label{app:featmask}
+
+\citet{ying2019gnnexplainer} address the near-zero-value blind spot of
+Section~\ref{sec:method} by not multiplying discarded feature entries by zero
+(or a value near it) at all. Instead, they treat the masked feature as a random
+variable and replace discarded entries with samples from that feature's own
+empirical marginal distribution, so a discarded feature is swapped for a
+\emph{typical} value rather than suppressed toward zero. This avoids the
+confound where "small mask weight" and "small feature value" look identical to
+the optimizer. Concretely, using a reparametrization trick to keep the sampling
+step differentiable,
+\begin{equation}
+  \bfx_j^F = \bfz + (\bfx_j - \bfz) \odot F,
+  \qquad \textstyle\sum_k F_k \leq K_F,
+  \label{eq:feat_reparam}
+\end{equation}
+where $\bfz$ is sampled from the empirical marginal distribution of the node
+features and $K_F$ caps the number of features kept in the explanation; the
+expectation over $\bfz$ is estimated by Monte Carlo sampling during training.
+Eq.~\eqref{eq:feat_reparam} is the mechanism referenced in
+Section~\ref{sec:method}: PyTorch Geometric's \GNNEx implementation does not
+carry it out, using the plain sigmoid mask of Eq.~\eqref{eq:feat_mask} instead.
+
+\section{The RBGV Example}
+\label{app:rbgv}
+
+\citet{azzolin2026gnnexplanations} illustrate the anchor-set construction of
+Section~\ref{sec:related} with a synthetic graph-classification dataset, RBGV:
+every graph contains red and blue nodes, randomly connected, whose relative
+counts ($\#\text{blue}$ vs.\ $\#\text{red}$) determine a binary label, plus one
+isolated green node and one isolated violet node present in \emph{every}
+instance, forming an anchor set. An SE-GNN can reach perfect task accuracy
+while reporting only the anchor nodes as its explanation: let the extractor
+output the green node when reds dominate and the violet node otherwise,
+\begin{equation}
+  e(G) = \begin{cases} u_{\text{green}} & \text{if } \#\text{red} \geq \#\text{blue} \\
+                        u_{\text{violet}} & \text{if } \#\text{blue} > \#\text{red}, \end{cases}
+  \qquad
+  g(R) = \begin{cases} 0 & \text{if } R = u_{\text{green}} \\
+                        1 & \text{if } R = u_{\text{violet}}. \end{cases}
+\end{equation}
+The composition $f = g \circ e$ is perfectly accurate, yet its reported
+explanation is color-blind to red and blue, the only nodes the label
+actually depends on. This is because $e$ must internally count red and blue
+nodes to decide which anchor to report, but never reveals that computation.
+This is the template Section~\ref{subsec:anchor} adapts to our clique
+dataset.
+
+\end{document}
